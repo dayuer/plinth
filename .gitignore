@@ -2,4 +2,5 @@ bin/
 *.test
 coverage.out
 audit/
+!internal/audit/
 semantics/snapshot.txt
