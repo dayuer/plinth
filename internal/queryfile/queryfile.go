@@ -40,6 +40,7 @@ func (q *Query) Allows(caller string) bool {
 
 // Parse parses one query file. filename is used to enforce name == file base.
 func Parse(filename string, src string) (*Query, error) {
+	src = strings.TrimPrefix(src, "\ufeff") // strip UTF-8 BOM if present
 	lines := strings.Split(src, "\n")
 	header := map[string]string{}
 	bodyStart := len(lines)
@@ -62,7 +63,7 @@ func Parse(filename string, src string) (*Query, error) {
 		}
 		k := strings.TrimSpace(rest[:colon])
 		if _, dup := header[k]; dup {
-			return nil, fmt.Errorf("%s: duplicate header key %q", filename, k)
+			return nil, fmt.Errorf("%s: duplicate header key %q at line %d", filename, k, i+1)
 		}
 		header[k] = strings.TrimSpace(rest[colon+1:])
 	}
@@ -88,6 +89,9 @@ func Parse(filename string, src string) (*Query, error) {
 			q.AllowTokens = append(q.AllowTokens, tok)
 		}
 	}
+	if len(q.AllowTokens) == 0 {
+		return nil, fmt.Errorf("%s: allow-tokens lists no tokens", filename)
+	}
 	if header["mode"] != "" {
 		q.Mode = header["mode"]
 	}
@@ -104,7 +108,7 @@ func Parse(filename string, src string) (*Query, error) {
 	if header["timeout-ms"] != "" {
 		n, err := strconv.Atoi(header["timeout-ms"])
 		if err != nil || n <= 0 {
-			return nil, fmt.Errorf("%s: timeout-ms must be a positive integer", filename)
+			return nil, fmt.Errorf("%s: timeout-ms %q must be a positive integer", filename, header["timeout-ms"])
 		}
 		q.TimeoutMs = n
 	}
@@ -133,6 +137,9 @@ func parseParam(part string) (Param, error) {
 	f := strings.Split(strings.TrimSpace(part), ":")
 	if len(f) != 3 {
 		return Param{}, fmt.Errorf("param %q: want name:type:required|optional|default", part)
+	}
+	if strings.TrimSpace(f[2]) == "" {
+		return Param{}, fmt.Errorf("param %q: empty required|optional|default field", part)
 	}
 	p := Param{Name: strings.TrimSpace(f[0]), Type: strings.TrimSpace(f[1]), Default: strings.TrimSpace(f[2])}
 	if !isIdent(p.Name) || p.Name == "" {

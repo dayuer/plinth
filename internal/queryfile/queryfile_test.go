@@ -66,23 +66,58 @@ func TestParseMinimal(t *testing.T) {
 }
 
 func TestParseErrors(t *testing.T) {
-	cases := map[string]string{
-		"missing name":   "-- allow-tokens: a\nSELECT 1",
-		"name != file":   "-- plinth: name: other\n-- allow-tokens: a\nSELECT 1",
-		"no header":      "SELECT 1",
-		"missing tokens": "-- plinth: name: q\nSELECT 1",
-		"write mode":     "-- plinth: name: q\n-- allow-tokens: a\n-- mode: write\nSELECT 1",
-		"dup key":        "-- plinth: name: q\n-- plinth: name: q\n-- allow-tokens: a\nSELECT 1",
-		"bad param kind": "-- plinth: name: q\n-- allow-tokens: a\n-- params: x:bigint:required\nSELECT 1",
-		"bad default":    "-- plinth: name: q\n-- allow-tokens: a\n-- params: x:int:abc\nSELECT 1",
-		"bad semantics":  "-- plinth: name: q\n-- allow-tokens: a\n-- semantics: invoices\nSELECT 1",
-		"empty sql":      "-- plinth: name: q\n-- allow-tokens: a\n",
-		"bad timeout":    "-- plinth: name: q\n-- allow-tokens: a\n-- timeout-ms: -5\nSELECT 1",
-		"malformed line": "-- plinth: name: q\n-- just a comment with no colon\n-- allow-tokens: a\nSELECT 1",
+	// Each case pins the error message to its own validation: if that
+	// validation is deleted, the substring check fails, not just err==nil.
+	cases := map[string]struct {
+		src string
+		err string // substring the error must carry
+	}{
+		"missing name":      {"-- allow-tokens: a\nSELECT 1", "missing 'name'"},
+		"name != file":      {"-- plinth: name: other\n-- allow-tokens: a\nSELECT 1", "must equal file base"},
+		"no header":         {"SELECT 1", "missing header"},
+		"missing tokens":    {"-- plinth: name: q\nSELECT 1", "allow-tokens"},
+		"zero tokens":       {"-- plinth: name: q\n-- allow-tokens: , ,\nSELECT 1", "no tokens"},
+		"write mode":        {"-- plinth: name: q\n-- allow-tokens: a\n-- mode: write\nSELECT 1", "reserved"},
+		"dup key":           {"-- plinth: name: q\n-- plinth: name: q\n-- allow-tokens: a\nSELECT 1", "duplicate header key"},
+		"bad param kind":    {"-- plinth: name: q\n-- allow-tokens: a\n-- params: x:bigint:required\nSELECT 1", "type must be"},
+		"bad default":       {"-- plinth: name: q\n-- allow-tokens: a\n-- params: x:int:abc\nSELECT 1", "invalid syntax"},
+		"empty param field": {"-- plinth: name: q\n-- allow-tokens: a\n-- params: x:int:\nSELECT 1", "empty required|optional|default"},
+		"bad semantics":     {"-- plinth: name: q\n-- allow-tokens: a\n-- semantics: invoices\nSELECT 1", "semantics"},
+		"empty sql":         {"-- plinth: name: q\n-- allow-tokens: a\n", "empty SQL body"},
+		"bad timeout":       {"-- plinth: name: q\n-- allow-tokens: a\n-- timeout-ms: -5\nSELECT 1", "timeout-ms"},
+		"malformed line":    {"-- plinth: name: q\n-- just a comment with no colon\n-- allow-tokens: a\nSELECT 1", "malformed header line"},
 	}
-	for name, src := range cases {
-		if _, err := Parse("q.sql", src); err == nil {
+	for name, tc := range cases {
+		_, err := Parse("q.sql", tc.src)
+		if err == nil {
 			t.Errorf("%s: expected error", name)
+			continue
 		}
+		if !strings.Contains(err.Error(), tc.err) {
+			t.Errorf("%s: error %q does not identify cause %q", name, err, tc.err)
+		}
+	}
+}
+
+func TestAllows(t *testing.T) {
+	q, err := Parse("q.sql", "-- plinth: name: q\n-- allow-tokens: web-bff, report-worker\nSELECT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !q.Allows("web-bff") {
+		t.Error("Allows(web-bff) = false, want true")
+	}
+	if q.Allows("worker") {
+		t.Error("Allows(worker) = true, want false")
+	}
+	if q.Allows("") {
+		t.Error(`Allows("") = true, want false`)
+	}
+}
+
+func TestParseBOM(t *testing.T) {
+	src := "\ufeff-- plinth: name: q1\n-- allow-tokens: a\nSELECT 1 AS one\n"
+	if _, err := Parse("q1.sql", src); err != nil {
+		t.Fatalf("BOM-prefixed file failed to parse: %v", err)
 	}
 }
