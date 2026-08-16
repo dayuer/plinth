@@ -1,0 +1,5 @@
+bin/
+*.test
+coverage.out
+audit/
+semantics/snapshot.txt
