@@ -29,9 +29,9 @@ var forbidden = map[string]bool{
 	"PG_STAT_FILE": true, "PG_SLEEP": true, "PG_TERMINATE_BACKEND": true,
 	"PG_CANCEL_BACKEND": true, "LO_IMPORT": true, "LO_EXPORT": true,
 	"SET_CONFIG": true, "PG_NOTIFY": true, "NEXTVAL": true,
-	"SETVAL": true, "PG_STAT_RESET": true, "PG_RELOAD_CONF": true,
+	"SETVAL": true, "PG_RELOAD_CONF": true,
 	"LO_GET": true, "LOREAD": true, "LO_OPEN": true, "LO_CLOSE": true,
-	"LO_UNLINK": true, "LOWRITE": true,
+	"LO_UNLINK": true, "LOWRITE": true, "LO_CREATE": true, "LO_CREAT": true,
 }
 
 // forbiddenPrefixes bans whole function families with one entry. A hit
@@ -39,10 +39,12 @@ var forbidden = map[string]bool{
 // named pg_sleepers), which is the safe direction: no legitimate
 // read-only query needs these families.
 var forbiddenPrefixes = []string{
-	"PG_SLEEP",     // pg_sleep, pg_sleep_for, pg_sleep_until
-	"PG_ADVISORY_", // every pg_advisory_* lock function
-	"DBLINK",       // dblink, dblink_exec, dblink_get_*
-	"PG_LS_",       // pg_ls_dir/waldir/logdir/tmpdir
+	"PG_SLEEP",         // pg_sleep, pg_sleep_for, pg_sleep_until
+	"PG_ADVISORY_",     // every pg_advisory_* lock function (including pg_try_advisory_*)
+	"PG_TRY_ADVISORY_", // pg_try_advisory_lock/xact_lock (and _shared variants)
+	"PG_STAT_RESET",    // pg_stat_reset, pg_stat_reset_slru, etc.
+	"DBLINK",           // dblink, dblink_exec, dblink_get_*
+	"PG_LS_",           // pg_ls_dir/waldir/logdir/tmpdir
 }
 
 // Check reports whether sql is a single read-only statement. It must lex

@@ -71,6 +71,11 @@ func TestRejectsWritesAndDanger(t *testing.T) {
 		{"SELECT lo_unlink(1)", "LO_UNLINK"},
 		{"SELECT pg_stat_reset()", "PG_STAT_RESET"},
 		{"SELECT pg_reload_conf()", "PG_RELOAD_CONF"},
+		{"SELECT pg_try_advisory_lock(1)", "PG_TRY_ADVISORY_"},
+		{"SELECT pg_try_advisory_xact_lock_shared(1)", "PG_TRY_ADVISORY_"},
+		{"SELECT pg_stat_reset_slru('x')", "PG_STAT_RESET"},
+		{"SELECT lo_create(0)", "LO_CREATE"},
+		{"SELECT lo_creat(131072)", "LO_CREAT"},
 		{"SELECT pg_ls_waldir()", "PG_LS_"},
 		{"SELECT 1; ", "statement separator"},
 		// Identifier-adjacent '$$' is code, not a dollar quote (PostgreSQL
