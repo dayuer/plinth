@@ -31,7 +31,7 @@ var forbidden = map[string]bool{
 	"SET_CONFIG": true, "PG_NOTIFY": true, "NEXTVAL": true,
 	"SETVAL": true, "PG_STAT_RESET": true, "PG_RELOAD_CONF": true,
 	"LO_GET": true, "LOREAD": true, "LO_OPEN": true, "LO_CLOSE": true,
-	"LO_UNLINK": true,
+	"LO_UNLINK": true, "LOWRITE": true,
 }
 
 // forbiddenPrefixes bans whole function families with one entry. A hit

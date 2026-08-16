@@ -67,6 +67,7 @@ func TestRejectsWritesAndDanger(t *testing.T) {
 		{"SELECT loread(0, 100)", "LOREAD"},
 		{"SELECT lo_open(1, 131072)", "LO_OPEN"},
 		{"SELECT lo_close(1)", "LO_CLOSE"},
+		{"SELECT lowrite(fd, data)", "LOWRITE"},
 		{"SELECT lo_unlink(1)", "LO_UNLINK"},
 		{"SELECT pg_stat_reset()", "PG_STAT_RESET"},
 		{"SELECT pg_reload_conf()", "PG_RELOAD_CONF"},
