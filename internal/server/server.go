@@ -25,14 +25,15 @@ type Runner interface {
 	Run(context.Context, *queryfile.Query, map[string]any) (*exec.Result, error)
 }
 
-// maxBodyBytes caps the request body; larger (or trailing-garbage) payloads
-// fail JSON decode and get a 400.
+// maxBodyBytes caps the request body at 1MB: the first JSON value must
+// complete within the limit; trailing bytes after a complete first value
+// are ignored (not rejected).
 const maxBodyBytes = 1 << 20
 
 type Server struct {
 	reg    *registry.Registry
 	run    Runner
-	tokens map[string]string // token → caller
+	tokens map[string]string // caller -> token
 	aud    *audit.Writer
 }
 
@@ -40,6 +41,9 @@ type Server struct {
 // hides the Engine behind an interface, so the caller constructing a real
 // *exec.Engine (serve, T10) must itself refuse to start when
 // Engine.DefaultTimeout <= 0 or Engine.MaxRows <= 0.
+//
+// tokens must have distinct values — meta.LoadConfig enforces this;
+// hand-built maps with duplicates give nondeterministic authz.
 func New(reg *registry.Registry, run Runner, tokens map[string]string, aud *audit.Writer) *Server {
 	return &Server{reg: reg, run: run, tokens: tokens, aud: aud}
 }
@@ -90,11 +94,11 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	res, err := s.run.Run(r.Context(), q, args)
 	if err != nil {
 		werr := fmt.Errorf("query %q: %w", name, err)
-		s.record(audit.Record{TS: time.Now(), Caller: caller, Query: name, Params: args, Status: "error", Err: werr.Error()})
+		s.record(audit.Record{TS: time.Now().UTC(), Caller: caller, Query: name, Params: args, Status: "error", Err: werr.Error()})
 		problem(w, http.StatusInternalServerError, "execution failed", werr.Error())
 		return
 	}
-	s.record(audit.Record{TS: time.Now(), Caller: caller, Query: name, Params: args, Status: "ok", Rows: len(res.Rows), Ms: res.DurationMs})
+	s.record(audit.Record{TS: time.Now().UTC(), Caller: caller, Query: name, Params: args, Status: "ok", Rows: len(res.Rows), Ms: res.DurationMs})
 
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Plinth-Rows", strconv.Itoa(len(res.Rows)))
