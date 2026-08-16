@@ -19,7 +19,7 @@ type Record struct {
 	Params map[string]any `json:"params,omitempty"`
 	Rows   int            `json:"rows"`
 	Ms     int64          `json:"ms"`
-	Status string         `json:"status"` // ok | error
+	Status string         `json:"status"` // ok | error | denied | bad-request
 	Err    string         `json:"err,omitempty"`
 }
 

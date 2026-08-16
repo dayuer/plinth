@@ -113,8 +113,8 @@ func walk(sql string, emit func(string), param func(name string) string) error {
 // Analyze returns SQL safe for keyword scanning: every comment and string
 // literal chunk has its contents blanked (newlines preserved), and :name
 // parameters are blanked. Also returns distinct parameters in
-// first-appearance order. On error, the other return values are partial
-// and must be discarded.
+// first-appearance order. On error, both other return values are the zero
+// values — no partial results are ever handed back.
 func Analyze(sql string) (clean string, params []string, err error) {
 	seen := map[string]bool{}
 	var b strings.Builder
@@ -145,13 +145,16 @@ func Analyze(sql string) (clean string, params []string, err error) {
 			return ":" + strings.Repeat(" ", len(name))
 		},
 	)
-	return b.String(), params, err
+	if err != nil {
+		return "", nil, err
+	}
+	return b.String(), params, nil
 }
 
 // Rewrite converts :name placeholders to $N in first-appearance order and
 // returns the ordered parameter names. Comments and literals pass through
-// untouched. On error, the other return values are partial and must be
-// discarded.
+// untouched. On error, both other return values are the zero values — no
+// partial results are ever handed back.
 func Rewrite(sql string) (string, []string, error) {
 	idx := map[string]int{}
 	var order []string
@@ -167,5 +170,8 @@ func Rewrite(sql string) (string, []string, error) {
 			return fmt.Sprintf("$%d", idx[name])
 		},
 	)
-	return b.String(), order, err
+	if err != nil {
+		return "", nil, err
+	}
+	return b.String(), order, nil
 }

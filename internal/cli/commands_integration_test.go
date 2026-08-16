@@ -3,6 +3,7 @@
 package cli
 
 import (
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -36,6 +37,85 @@ SELECT id, status FROM invoices WHERE org_id = :org_id AND (:status::text IS NUL
 		t.Fatal(err)
 	}
 	return dir
+}
+
+// writeSemQuery adds a query that pins a semantics dataset (spec v2 §7).
+func writeSemQuery(t *testing.T, dir, name, dataset, snapshot string) {
+	t.Helper()
+	src := "-- plinth: name: " + name + "\n-- allow-tokens: web-bff\n" +
+		"-- semantics: dataset=" + dataset + " snapshot=" + snapshot + "\n" +
+		"SELECT 1 AS one\n"
+	if err := os.WriteFile(filepath.Join(dir, "queries", name+".sql"), []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// captureStderr collects everything fn writes to os.Stderr — validate
+// reports each problem there and returns only an exit-code error.
+func captureStderr(t *testing.T, fn func()) string {
+	t.Helper()
+	old := os.Stderr
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stderr = w
+	defer func() { os.Stderr = old }()
+	fn()
+	w.Close()
+	b, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// TestValidateDatasetExistence covers both branches of the §7 gate:
+// declaring semantics with no snapshot pulled at all, and referencing a
+// dataset the snapshot does not name. validate is offline — the database
+// URL in plinth.yml is never used here.
+func TestValidateDatasetExistence(t *testing.T) {
+	dir := writeProject(t, "postgres://offline-validate-only")
+	writeSemQuery(t, dir, "sem-query", "invoices", "abc123def456")
+
+	// Branch 1: semantics/datasets.yml does not exist.
+	var err error
+	stderr := captureStderr(t, func() {
+		err = Run([]string{"validate", "--dir", dir})
+	})
+	if err == nil || ExitCode(err) != 2 {
+		t.Fatalf("missing snapshot: got %v", err)
+	}
+	if !strings.Contains(stderr, "semantics snapshot missing — run 'plinth pull' first") {
+		t.Fatalf("missing snapshot message: %s", stderr)
+	}
+
+	// Branch 2: snapshot exists but does not name the referenced dataset.
+	if err := os.MkdirAll(filepath.Join(dir, "semantics"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "semantics", "datasets.yml"),
+		[]byte("datasets:\n  - name: payments\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stderr = captureStderr(t, func() {
+		err = Run([]string{"validate", "--dir", dir})
+	})
+	if err == nil || ExitCode(err) != 2 {
+		t.Fatalf("unknown dataset: got %v", err)
+	}
+	if !strings.Contains(stderr, `references dataset "invoices" not found in semantics/datasets.yml`) {
+		t.Fatalf("unknown dataset message: %s", stderr)
+	}
+
+	// Positive control: the dataset named in the snapshot validates clean.
+	if err := os.WriteFile(filepath.Join(dir, "semantics", "datasets.yml"),
+		[]byte("datasets:\n  - name: invoices\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Run([]string{"validate", "--dir", dir}); err != nil {
+		t.Fatalf("dataset present: %v", err)
+	}
 }
 
 func TestCLIValidateAndTest(t *testing.T) {

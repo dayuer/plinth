@@ -2,6 +2,7 @@ name: ci
 on:
   push:
     branches: [main]
+    tags: ['v*']
   pull_request:
 jobs:
   test:
@@ -26,3 +27,5 @@ jobs:
           go-version-file: go.mod
       - name: test (integration)
         run: go test -tags integration ./... -count=1 -timeout 10m
+      - name: fuzz smoke
+        run: go test ./internal/sqlscan/ -fuzz FuzzAnalyzeRewrite -fuzztime 30s

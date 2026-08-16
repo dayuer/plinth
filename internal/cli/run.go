@@ -39,6 +39,9 @@ func (e *DBError) Error() string {
 }
 func (e *DBError) Unwrap() error { return e.Err }
 
+// version is the single source for `plinth version`; bump per release.
+const version = "v0.1.0"
+
 func usage() {
 	fmt.Println(`plinth - AI-maintained SQL BFF for existing PostgreSQL
 
@@ -57,6 +60,12 @@ func Run(args []string) error {
 		return nil
 	}
 	switch args[0] {
+	case "-h", "--help", "help":
+		usage()
+		return nil
+	case "version":
+		fmt.Println("plinth " + version)
+		return nil
 	case "validate":
 		return runValidate(args[1:])
 	case "test":

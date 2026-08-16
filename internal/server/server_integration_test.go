@@ -38,7 +38,7 @@ ORDER BY id`,
 	defer aud.Close()
 	s := New(registry.NewForTest(q),
 		&exec.Engine{Pool: pool, DefaultTimeout: 5 * time.Second, MaxRows: 100},
-		map[string]string{"web-bff": "tok1"}, aud)
+		map[string]string{"web-bff": "tok1", "worker": "tok2"}, aud)
 	ts := httptest.NewServer(s.Handler())
 	defer ts.Close()
 
@@ -59,6 +59,19 @@ ORDER BY id`,
 		t.Fatalf("rows = %+v", body.Rows)
 	}
 
+	// A caller whose token authenticates but is not in allow-tokens gets
+	// 403 — and that rejection must land in the audit log as denied.
+	req2, _ := http.NewRequest("POST", ts.URL+"/q/invoice-list", strings.NewReader(`{"org_id":1}`))
+	req2.Header.Set("X-Plinth-Token", "tok2")
+	resp2, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp2.Body.Close()
+	if resp2.StatusCode != 403 {
+		t.Fatalf("forbidden request = %d", resp2.StatusCode)
+	}
+
 	f, _ := os.Open(audPath)
 	defer f.Close()
 	sc := bufio.NewScanner(f)
@@ -68,7 +81,10 @@ ORDER BY id`,
 		json.Unmarshal(sc.Bytes(), &m)
 		recs = append(recs, m)
 	}
-	if len(recs) != 1 || recs[0]["caller"] != "web-bff" || recs[0]["query"] != "invoice-list" {
+	if len(recs) != 2 {
+		t.Fatalf("audit = %+v", recs)
+	}
+	if recs[0]["caller"] != "web-bff" || recs[0]["query"] != "invoice-list" {
 		t.Fatalf("audit = %+v", recs)
 	}
 	if recs[0]["params"].(map[string]any)["status"] != "***" {
@@ -76,5 +92,15 @@ ORDER BY id`,
 	}
 	if recs[0]["status"] != "ok" {
 		t.Errorf("audit status = %v", recs[0]["status"])
+	}
+	d := recs[1]
+	if d["caller"] != "worker" || d["query"] != "invoice-list" || d["status"] != "denied" {
+		t.Errorf("denial audit = %+v", d)
+	}
+	if rows, _ := d["rows"].(float64); rows != 0 {
+		t.Errorf("denial rows = %v, want 0", d["rows"])
+	}
+	if d["err"] != "forbidden" {
+		t.Errorf("denial err = %v, want the problem title", d["err"])
 	}
 }

@@ -70,27 +70,33 @@ func (s *Server) Handler() http.Handler {
 
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Order per contract: query existence (404), token (401), allow (403).
+	// The caller is resolved up front (a pure lookup) so every denial below
+	// can name it in the audit log; the response order is unchanged.
 	name := r.PathValue("name")
+	caller := s.callerFor(r.Header.Get("X-Plinth-Token"))
 	var q *queryfile.Query
 	if reg := s.reg.Load(); reg != nil {
 		q = reg.Get(name)
 	}
 	if q == nil {
+		s.auditDenial("denied", caller, name, "query not found")
 		problem(w, http.StatusNotFound, "query not found", fmt.Sprintf("no query named %q is loaded", name))
 		return
 	}
-	caller := s.callerFor(r.Header.Get("X-Plinth-Token"))
 	if caller == "" {
+		s.auditDenial("denied", caller, name, "unauthorized")
 		problem(w, http.StatusUnauthorized, "unauthorized", "missing or unknown token")
 		return
 	}
 	if !q.Allows(caller) {
+		s.auditDenial("denied", caller, name, "forbidden")
 		problem(w, http.StatusForbidden, "forbidden", fmt.Sprintf("caller %q is not allowed to run query %q", caller, name))
 		return
 	}
 
 	var body map[string]any
 	if err := json.NewDecoder(io.LimitReader(r.Body, maxBodyBytes)).Decode(&body); err != nil {
+		s.auditDenial("bad-request", caller, name, "invalid request body")
 		problem(w, http.StatusBadRequest, "invalid request body", err.Error())
 		return
 	}
@@ -103,6 +109,7 @@ func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// normalized raw map (not the coerced one) goes to Run — the engine
 	// stays the single source of truth for coercion, defaults and NULLs.
 	if _, err := exec.Coerce(q.Params, args); err != nil {
+		s.auditDenial("bad-request", caller, name, "invalid parameters")
 		problem(w, http.StatusBadRequest, "invalid parameters", err.Error())
 		return
 	}
@@ -162,6 +169,21 @@ func (s *Server) record(rec audit.Record) {
 	if err := s.aud.Record(rec); err != nil {
 		log.Printf("audit write failed (continuing): query %q caller %q: %v", rec.Query, rec.Caller, err)
 	}
+}
+
+// auditDenial records a rejected request: status "denied" for authz and
+// not-found rejections (401/403/404), "bad-request" for malformed input
+// (400). caller is the resolved caller ("" when the token did not
+// authenticate), rows are 0, and err carries the problem title — enough to
+// answer "who tried what" without logging request bodies.
+func (s *Server) auditDenial(status, caller, query, title string) {
+	s.record(audit.Record{
+		TS:     time.Now().UTC(),
+		Caller: caller,
+		Query:  query,
+		Status: status,
+		Err:    title,
+	})
 }
 
 // problem writes an RFC 7807 response: {type, title, status, detail}.

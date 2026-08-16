@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -59,13 +60,15 @@ func printErrs(cmd string, errs []error) {
 }
 
 // runValidate is the offline gate: load every query, report all problems,
-// then warn about snapshots pinned to outdated semantics (spec v2 §7).
+// check dataset references against the semantics snapshot, then warn about
+// snapshots pinned to outdated semantics (spec v2 §7).
 func runValidate(args []string) error {
 	_, dir, err := newFlagSet("validate", args, nil)
 	if err != nil {
 		return err
 	}
 	reg, errs := registry.LoadDir(*dir)
+	errs = append(errs, checkSemDatasets(*dir, reg)...)
 	printErrs("validate", errs)
 	if len(errs) > 0 {
 		return &MetaError{Err: fmt.Errorf("%d query problem(s)", len(errs))}
@@ -73,6 +76,45 @@ func runValidate(args []string) error {
 	warnSemanticsDrift(*dir, reg)
 	fmt.Printf("validate: ok (%d queries)\n", len(reg.Names()))
 	return nil
+}
+
+// checkSemDatasets enforces the dataset half of the semantics contract
+// (spec v2 §7): a query declaring 'semantics: dataset=X …' must find X in
+// the snapshot. datasets.yml is the product of an external pull_command, so
+// its format is not parseable here — existence is a substring check of the
+// dataset name in the file text. That can only over-accept (a short name
+// matching inside another token), never over-reject a dataset the exporter
+// actually names; the alternative — parsing an unknown format — is worse.
+// Without a snapshot, any semantics declaration is an error: the query
+// claims a basis that cannot be checked.
+func checkSemDatasets(dir string, reg *registry.Registry) []error {
+	if reg == nil {
+		return nil
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "semantics", "datasets.yml"))
+	if os.IsNotExist(err) {
+		for _, name := range reg.Names() {
+			if q := reg.Get(name); q != nil && q.SemDataset != "" {
+				return []error{fmt.Errorf("query %s: semantics snapshot missing — run 'plinth pull' first", name)}
+			}
+		}
+		return nil
+	}
+	if err != nil {
+		return []error{err}
+	}
+	text := string(b)
+	var errs []error
+	for _, name := range reg.Names() {
+		q := reg.Get(name)
+		if q == nil || q.SemDataset == "" {
+			continue
+		}
+		if !strings.Contains(text, q.SemDataset) {
+			errs = append(errs, fmt.Errorf("query %s references dataset %q not found in semantics/datasets.yml", name, q.SemDataset))
+		}
+	}
+	return errs
 }
 
 // warnSemanticsDrift prints a warning for each query that pins a semantics
@@ -145,7 +187,13 @@ func runTest(args []string) error {
 	}
 	fmt.Printf("test %s: %d rows (capped at 5)\n", name, len(res.Rows))
 	for i, row := range res.Rows {
-		fmt.Printf("  row[%d] = %v\n", i, row)
+		// JSON rendering, not %v: pgx hands back driver-native structs
+		// (pgtype.*), whose Go repr would be unreadable noise.
+		b, err := json.Marshal(row)
+		if err != nil {
+			b = []byte(fmt.Sprintf("%v", row))
+		}
+		fmt.Printf("  row[%d] = %s\n", i, b)
 	}
 	return nil
 }
@@ -273,6 +321,17 @@ func buildStack(cfg *meta.Config, reg *registry.Registry) (*server.Server, func(
 	return srv, func() error { pool.Close(); return aud.Close() }, nil
 }
 
+// anchorPath resolves p against dir when it is not absolute, so a relative
+// audit.path (the default "audit/executions.jsonl") always lands under
+// --dir regardless of the process working directory — serve writes and
+// status tails the same file.
+func anchorPath(dir, p string) string {
+	if filepath.IsAbs(p) {
+		return p
+	}
+	return filepath.Join(dir, p)
+}
+
 // runServe starts the HTTP BFF. Any query problem is fatal — never serve a
 // partial registry. SIGHUP hot-reloads queries: a failed reload keeps the
 // old registry and continues serving.
@@ -288,6 +347,7 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	cfg.Audit.Path = anchorPath(*dir, cfg.Audit.Path)
 	reg, errs := registry.LoadDir(*dir)
 	printErrs("serve", errs)
 	if len(errs) > 0 || reg == nil {
@@ -367,7 +427,7 @@ func runStatus(args []string) error {
 		fmt.Fprintln(os.Stderr, "note:", err)
 		return nil
 	}
-	tailAudit(cfg.Audit.Path)
+	tailAudit(anchorPath(*dir, cfg.Audit.Path))
 	return nil
 }
 
