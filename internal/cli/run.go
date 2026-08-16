@@ -21,12 +21,22 @@ func ExitCode(err error) int {
 
 type MetaError struct{ Err error }
 
-func (e *MetaError) Error() string { return e.Err.Error() }
+func (e *MetaError) Error() string {
+	if e.Err == nil {
+		return "metadata error"
+	}
+	return e.Err.Error()
+}
 func (e *MetaError) Unwrap() error { return e.Err }
 
 type DBError struct{ Err error }
 
-func (e *DBError) Error() string { return e.Err.Error() }
+func (e *DBError) Error() string {
+	if e.Err == nil {
+		return "database error"
+	}
+	return e.Err.Error()
+}
 func (e *DBError) Unwrap() error { return e.Err }
 
 func usage() {
@@ -49,6 +59,12 @@ func Run(args []string) error {
 	switch args[0] {
 	case "validate", "test", "pull", "serve", "status":
 		return &MetaError{Err: fmt.Errorf("%s: not implemented yet (Plan 1 v2 in progress)", args[0])}
+	case "semantics":
+		if len(args) > 1 && args[1] == "pull" {
+			return &MetaError{Err: fmt.Errorf("semantics pull: not implemented yet (Plan 1 v2 in progress)")}
+		}
+		usage()
+		return fmt.Errorf("unknown command %q", args[0])
 	default:
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])
