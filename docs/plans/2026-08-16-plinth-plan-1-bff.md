@@ -457,6 +457,8 @@ Expected: FAIL(`undefined: Parse`)
 
 - [ ] **Step 3: 写实现**
 
+> 修订(2026-08-16 执行中发现):头部首行为 `-- plinth: name: X`,其余键为裸 `-- key: value`;解析须在键值拆分前剥离可选的 `plinth:` 前缀,否则首行会整体键成 `header["plinth"]`。下方代码清单未含此剥离,以本修订为准。
+
 `internal/queryfile/queryfile.go`:
 
 ```go
