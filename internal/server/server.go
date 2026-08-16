@@ -11,6 +11,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/dayuer/plinth/internal/audit"
@@ -31,7 +32,10 @@ type Runner interface {
 const maxBodyBytes = 1 << 20
 
 type Server struct {
-	reg    *registry.Registry
+	// reg is an atomic pointer so SIGHUP reload swaps the whole query set
+	// without a lock: request goroutines load, reload stores. The old
+	// registry is never mutated — in-flight requests keep a consistent view.
+	reg    atomic.Pointer[registry.Registry]
 	run    Runner
 	tokens map[string]string // caller -> token
 	aud    *audit.Writer
@@ -45,7 +49,16 @@ type Server struct {
 // tokens must have distinct values — meta.LoadConfig enforces this;
 // hand-built maps with duplicates give nondeterministic authz.
 func New(reg *registry.Registry, run Runner, tokens map[string]string, aud *audit.Writer) *Server {
-	return &Server{reg: reg, run: run, tokens: tokens, aud: aud}
+	s := &Server{run: run, tokens: tokens, aud: aud}
+	s.reg.Store(reg)
+	return s
+}
+
+// SetRegistry atomically replaces the served query set (SIGHUP hot reload).
+// Callers must pass a fully-loaded registry: serve refuses to start and
+// reloads abort on LoadDir errors before reaching here.
+func (s *Server) SetRegistry(reg *registry.Registry) {
+	s.reg.Store(reg)
 }
 
 // Handler routes POST /q/{name} (other methods get Go's 405).
@@ -58,7 +71,10 @@ func (s *Server) Handler() http.Handler {
 func (s *Server) handleQuery(w http.ResponseWriter, r *http.Request) {
 	// Order per contract: query existence (404), token (401), allow (403).
 	name := r.PathValue("name")
-	q := s.reg.Get(name)
+	var q *queryfile.Query
+	if reg := s.reg.Load(); reg != nil {
+		q = reg.Get(name)
+	}
 	if q == nil {
 		problem(w, http.StatusNotFound, "query not found", fmt.Sprintf("no query named %q is loaded", name))
 		return

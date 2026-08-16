@@ -57,11 +57,19 @@ func Run(args []string) error {
 		return nil
 	}
 	switch args[0] {
-	case "validate", "test", "pull", "serve", "status":
-		return &MetaError{Err: fmt.Errorf("%s: not implemented yet (Plan 1 v2 in progress)", args[0])}
+	case "validate":
+		return runValidate(args[1:])
+	case "test":
+		return runTest(args[1:])
+	case "pull":
+		return runPull(args[1:])
+	case "serve":
+		return runServe(args[1:])
+	case "status":
+		return runStatus(args[1:])
 	case "semantics":
 		if len(args) > 1 && args[1] == "pull" {
-			return &MetaError{Err: fmt.Errorf("semantics pull: not implemented yet (Plan 1 v2 in progress)")}
+			return runPull(args[2:])
 		}
 		usage()
 		return fmt.Errorf("unknown command %q", args[0])

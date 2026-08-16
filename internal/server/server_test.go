@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/dayuer/plinth/internal/audit"
@@ -124,4 +125,70 @@ func TestNullNormalizedToAbsent(t *testing.T) {
 	if _, has := stub.gotA["extra"]; has {
 		t.Errorf("null must be normalized to absent: %v", stub.gotA)
 	}
+}
+
+// staticRunner is a Runner safe under concurrency (unlike stubRunner, it
+// keeps no per-request state).
+type staticRunner struct{}
+
+func (staticRunner) Run(context.Context, *queryfile.Query, map[string]any) (*exec.Result, error) {
+	return &exec.Result{Rows: []map[string]any{{"id": int64(1)}}}, nil
+}
+
+// TestSetRegistryConcurrent pins the reload contract: SetRegistry may swap
+// the query set while requests are in flight. Whatever registry a request
+// observes, it resolves its query against exactly that one — 200 or a clean
+// 404, never a data race or a panic (run under -race).
+func TestSetRegistryConcurrent(t *testing.T) {
+	mk := func(name string) *registry.Registry {
+		return registry.NewForTest(&queryfile.Query{
+			Name: name, Mode: "read", AllowTokens: []string{"web-bff"},
+			SQL: "SELECT 1",
+		})
+	}
+	regA, regB := mk("qa"), mk("qb")
+	s := New(regA, staticRunner{}, map[string]string{"web-bff": "tok1"}, nil)
+	ts := httptest.NewServer(s.Handler())
+	t.Cleanup(ts.Close)
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	for range 4 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				for _, name := range []string{"qa", "qb"} {
+					req, _ := http.NewRequest("POST", ts.URL+"/q/"+name, strings.NewReader(`{}`))
+					req.Header.Set("X-Plinth-Token", "tok1")
+					resp, err := http.DefaultClient.Do(req)
+					if err != nil {
+						t.Errorf("request during swap: %v", err)
+						return
+					}
+					resp.Body.Close()
+					// Whichever registry the request loaded, the asked-for
+					// name is served 200 or cleanly 404 — never 5xx.
+					if resp.StatusCode != 200 && resp.StatusCode != 404 {
+						t.Errorf("name %s: status %d during swap", name, resp.StatusCode)
+						return
+					}
+				}
+			}
+		}()
+	}
+	for i := 0; i < 2000; i++ {
+		if i%2 == 0 {
+			s.SetRegistry(regB)
+		} else {
+			s.SetRegistry(regA)
+		}
+	}
+	close(done)
+	wg.Wait()
 }

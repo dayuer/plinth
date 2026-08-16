@@ -17,3 +17,12 @@ jobs:
         run: go vet ./...
       - name: test
         run: go test ./... -race -count=1
+  integration:
+    runs-on: ubuntu-latest # Docker preinstalled for testcontainers
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: test (integration)
+        run: go test -tags integration ./... -count=1 -timeout 10m
