@@ -12,8 +12,12 @@ func isIdentChar(c byte) bool {
 	return c == '_' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
 }
 
-// walk traverses sql. emit receives every non-parameter chunk verbatim
-// (comments and literals included); param receives each :name occurrence
+// walk traverses sql.
+//
+// emit receives every non-parameter chunk verbatim (comments and literals
+// included). Contract: comments/literals are emitted as single
+// multi-character chunks; verbatim emissions are exactly 1 byte — Analyze
+// relies on this to decide blanking. param receives each :name occurrence
 // and returns the text to substitute.
 func walk(sql string, emit func(string), param func(name string) string) error {
 	n := len(sql)
@@ -61,7 +65,16 @@ func walk(sql string, emit func(string), param func(name string) string) error {
 			}
 			emit(sql[i : j+1])
 			i = j + 1
-		case c == '$' && i+1 < n && sql[i+1] == '$':
+		case c == '$' && i+1 < n && sql[i+1] == '$' &&
+			(i == 0 || !(isIdentChar(sql[i-1]) || sql[i-1] == '$' || sql[i-1] >= 0x80)):
+			// PostgreSQL lexes '$' as an identifier-continue byte (and
+			// non-ASCII bytes as identifier bytes): a$$b is ONE identifier,
+			// not ident + dollar-quote. So '$$' opens a dollar quote only
+			// when the preceding byte cannot be part of an identifier;
+			// otherwise these '$' bytes are ordinary code — fall to default,
+			// which emits one '$' per iteration, so the next '$' of a $$$
+			// run is re-examined (and again rejected: its predecessor is
+			// '$').
 			j := i + 2
 			for j < n && !(sql[j] == '$' && j+1 < n && sql[j+1] == '$') {
 				j++
@@ -100,7 +113,8 @@ func walk(sql string, emit func(string), param func(name string) string) error {
 // Analyze returns SQL safe for keyword scanning: every comment and string
 // literal chunk has its contents blanked (newlines preserved), and :name
 // parameters are blanked. Also returns distinct parameters in
-// first-appearance order.
+// first-appearance order. On error, the other return values are partial
+// and must be discarded.
 func Analyze(sql string) (clean string, params []string, err error) {
 	seen := map[string]bool{}
 	var b strings.Builder
@@ -136,7 +150,8 @@ func Analyze(sql string) (clean string, params []string, err error) {
 
 // Rewrite converts :name placeholders to $N in first-appearance order and
 // returns the ordered parameter names. Comments and literals pass through
-// untouched.
+// untouched. On error, the other return values are partial and must be
+// discarded.
 func Rewrite(sql string) (string, []string, error) {
 	idx := map[string]int{}
 	var order []string
