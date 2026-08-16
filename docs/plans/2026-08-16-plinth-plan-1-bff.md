@@ -800,6 +800,8 @@ Expected: FAIL(`undefined: Analyze`)
 
 - [ ] **Step 3: 写实现**
 
+> 修订(2026-08-16 执行中实证):下方清单有两处 bug,以本修订为准——① `::` 转型需独立 case 消费双冒号(原逻辑会把 `::text` 的第二个冒号当参数起点,吞掉 `text`);② 单字符 emit 必须用 `sql[i:i+1]` 切片,`string(byte)` 会按 rune 重编码毁掉多字节 UTF-8。另注:标签美元引号(`$tag$..$tag$`)与嵌套块注释不做识别(内容按代码扫,只会过拒不放过);PG 数组切片 `arr[1:2]` 会把 `2` 误判为参数名(绑定时报错,非注入面)。
+
 `internal/sqlscan/sqlscan.go`:
 
 ```go
