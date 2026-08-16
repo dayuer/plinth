@@ -30,6 +30,15 @@ func (r *Registry) Names() []string {
 	return out
 }
 
+// NewForTest builds a registry from explicit queries (test helper).
+func NewForTest(qs ...*queryfile.Query) *Registry {
+	r := &Registry{queries: map[string]*queryfile.Query{}}
+	for _, q := range qs {
+		r.queries[q.Name] = q
+	}
+	return r
+}
+
 // add registers q, rejecting a name that is already taken. source is the
 // file the query came from, so the error carries the filename.
 func (r *Registry) add(q *queryfile.Query, source string) error {
