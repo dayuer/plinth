@@ -135,3 +135,17 @@ func TestLoadDirIgnoresSubdirs(t *testing.T) {
 		t.Fatalf("names = %v", reg.Names())
 	}
 }
+
+func TestLoadDirParamConsistencyCheckedAtExec(t *testing.T) {
+	// declared params that do not appear in SQL are fine at load time
+	// (exec catches mismatch); load only checks structure + readcheck.
+	q := "-- plinth: name: q2\n-- allow-tokens: a\n-- params: x:int:required\nSELECT 1\n"
+	dir := writeQueries(t, map[string]string{"q2.sql": q})
+	reg, errs := LoadDir(dir)
+	if len(errs) != 0 {
+		t.Fatalf("errs = %v", errs)
+	}
+	if reg.Get("q2") == nil {
+		t.Fatal("q2 should load")
+	}
+}
