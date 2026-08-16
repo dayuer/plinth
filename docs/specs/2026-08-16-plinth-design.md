@@ -1,186 +1,129 @@
-# Plinth 设计文档 v1.0
+# Plinth 设计文档 v2.0
 
-日期:2026-08-16 · 状态:待用户终审
-决策链见 `../decisions/2026-08-16-brainstorm-decisions.md`,调研证据见 `../research/`。
+日期:2026-08-16 · 状态:已批准(v2 转向版;v1.0「数据底座四件套」见 git 历史,未实现即被替代)
+决策链见 `../decisions/2026-08-16-brainstorm-decisions.md`(含转向记录)。
 
-一句话定位:**agent 原生、文件优先、给存量 PostgreSQL 当客人的数据底座网关**——单二进制旁挂,对目标库零 DDL,metadata 全在 YAML,权限编译成参数化 SQL,Claude 通过内置 MCP 直接运维。
+一句话定位:**AI 维护、文件优先、给存量 PostgreSQL 当客人的 SQL BFF 网关**——Claude 依据 Lovrabet 数据集语义写命名 SQL,SQL 以文件入库(git 即变更审计),业务服务带 token 调用,执行全留痕。
 
-## 0. 背景与动机
+## 0. 背景与转向
 
-Directus 调研(`../research/directus-deep-dive.md`)证明「内省现有 PG + 即时 API + 声明式行列权限 + 自动化」这个组合有真实价值,但其协议两年两度收紧(GPLv3 → BSL 1.1 → MSCL + 注册密钥),不适合作为自用底座的长期地基。开源横评(`../research/data-foundation-alternatives.md`)证明四件套加宽协议加声明式权限的完全体不存在:Hasura CE 最接近但 REST 弱且 v3 闭源;PostgREST 是积木无权限台;Supabase 想当库的主人。Plinth 补这个空档,首要服务 SilkLine,顺手以 Apache-2.0 开源。
+v1 调研(Directus/开源横评,见 `../research/`)确立「文件优先、零 DDL、agent 原生、Go、Apache-2.0」的底盘哲学。v2 把目标收窄到用户真实要的闭环:**SQL 不再由程序员手写维护,由 Claude 依据语义撰写、随业务变化自动调整,全程可审计**。v1 的表格 CRUD、行级权限表达式语言等设计随转向作废;底盘哲学与工程框架全部保留。
 
 ## 1. 目标与非目标
 
-**目标(MVP 五件基线)**
+**目标**
 
-1. 内省现有 PG,零迁移零系统表零触发器;
-2. 全自动 CRUD REST(PostgREST 查询语义子集);
-3. 字段级 + 行级权限,metadata 声明式,编译进 SQL;
-4. 表事件(webhook)+ cron 自动化,at-least-once 投递;
-5. 内置 MCP server,与 REST 同一条权限流水线。
+1. 命名查询注册中心:`queries/*.sql` 一个文件一个查询,注释头声明元数据;
+2. HTTP BFF:业务服务带静态 token 调 `POST /q/{name}`,参数化只读执行,返回 JSON;
+3. 双轨审计:变更审计=git 历史;执行审计=JSONL(调用方/查询/参数/行数/耗时/状态,支持按参数名脱敏);
+4. 语义同步:`plinth semantics pull` 从 Lovrabet CLI 导出数据集语义快照入库,查询声明所依据的快照版本,漂移即告警;
+5. agent 工作循环:pull → 写/改 SQL → validate(离线)→ test(真库试跑)→ commit → 热加载。
 
-**非目标(明确不做)**
+**非目标**
 
-GraphQL(留扩展点)、任何 UI、多数据库(PG only)、HA 多实例、可视化 Flows、文件存储、自有认证体系、分布式锁、任意代码执行。关系嵌套深度 MVP = 1。
+写操作(格式预留 `mode` 位,非 `read` 拒绝加载)、表格 CRUD、用户级鉴权(JWT)、GraphQL、UI、多数据库、多实例 HA、MCP server(留 v0.3,CLI+文件循环已可闭环)、SQL 结果缓存。
 
 ## 2. 总体架构
 
-单二进制 Go 进程(CGO-free 静态编译),旁挂部署:caddy vhost → Plinth → 现有 PG。
+单二进制 Go 进程(CGO-free),内网部署:caddy vhost → Plinth → SilkLine 生产 PG(**独立只读数据库角色**,只有 SELECT 授权)。
 
 ```
-caddy vhost ─→ Plinth 单二进制
-                ├─ REST 引擎(查询编译流水线)
-                ├─ 内省器(启动读 information_schema → 内存目录)
-                ├─ 权限编译器(metadata → 参数化 SQL 片段)
-                ├─ 事件引擎(pgoutput 复制流 → webhook 投递)
-                ├─ cron 调度器(状态存本地嵌入库)
-                ├─ MCP server(streamable HTTP + stdio)
-                └─ CLI 子命令(validate / diff / apply / serve / status)
+queries/*.sql ─→ 加载器(注释头解析)─→ 注册表 ─┐
+                                              ├→ POST /q/{name}
+plinth.yml(token/审计/超时/语义命令)──────────┤    → token 鉴权 + allow-tokens
+                                              │    → 参数校验(类型/必填)
+semantics/*.yml(Lovrabet 快照)←─ pull ←──────┤    → :name 重写为 $N
+                                              │    → pgx 只读执行(超时/行上限)
+audit/executions.jsonl ←──────────────────────┘    → JSON + X-Plinth-Rows/Duration
 ```
 
-硬约束:**对目标库零 DDL**。Plinth 自带状态(调度水位、死信队列)存本地嵌入存储 bbolt(纯 Go、单文件、零运维),不在目标库建任何对象。单实例部署(SilkLine 的真实形态),请求路径完全无状态,进程可随时重启。
+组件:`queryfile`(注释头解析)、`registry`(加载与静态校验)、`sqlscan`(注释/字符串感知扫描:剥离与参数发现)、`readcheck`(只读闸)、`exec`(命名参数重写+执行)、`server`(HTTP+鉴权)、`audit`(JSONL 写入)、`cli`(validate/test/pull/serve/status)。
 
-## 3. metadata 即代码
+硬约束:对目标库零 DDL(只读角色连查询都改不了结构);自带状态仅审计 JSONL,不进业务库。
 
-全部配置是仓库里的 YAML 文件,没有任何一层状态存数据库。
+## 3. 查询文件格式
 
-```
-plinth.yml          # 连接串、JWKS、事件引擎、嵌入存储路径
-models/*.yml        # 内省注解:暴露哪些表、隐藏列、别名、关系覆写
-policies/*.yml      # 角色→表:列白名单 + 行过滤表达式
-events/*.yml        # 表事件→webhook;cron 任务
-```
-
-`plinth.yml`:
-
-```yaml
-database:
-  url: ${DATABASE_URL}
-auth:
-  jwks_url: https://api.silkline.id/.well-known/jwks.json
-  roles_claim: role
-storage:
-  path: /var/lib/plinth/state.db
-events:
-  mode: logical          # logical | polling(降级)
-  slot_name: plinth_slot
+```sql
+-- plinth: name: invoice-list
+-- params: org_id:int:required | status:str:optional | limit:int:50
+-- allow-tokens: web-bff, report-worker
+-- semantics: dataset=invoices snapshot=2026-08-16a
+-- timeout-ms: 5000
+-- desc: 按机构列发票;依据 Lovrabet invoices 数据集语义
+SELECT id, buyer_id, status, amount_total, currency
+FROM invoices
+WHERE org_id = :org_id
+  AND (:status::text IS NULL OR status = :status)
+ORDER BY id DESC
+LIMIT :limit
 ```
 
-`models/invoices.yml`(注解只写增量,不复制 schema):
+规范:头部为文件起始的连续 `-- key: value` 注释行;`name` 必填且必须等于文件名(去 `.sql`);`params` 用 `|` 分隔,每项 `name:type:required|optional|default 值`,type ∈ int|str|bool|float;`allow-tokens` 必填(逗号分隔的调用方名);`semantics` 格式 `dataset=X snapshot=Y`;`timeout-ms` 可选(默认 5000);`mode` 未声明视为 `read`,声明为 `write` 则**拒绝加载**(扩展位,防抢跑)。正文为 `:name` 命名参数 SQL;`::` 转型语法不受影响;不支持 `E''` 字符串与字符串内反斜杠(加载即报错)。
 
-```yaml
-schema: public
-table: invoices
-expose: true
-columns:
-  hide: [internal_note]
-relations:
-  - name: buyer
-    type: many-to-one
-    on: buyer_id
-    references: { table: buyers, column: id }
-    expose: true
-```
+## 4. 运行时流水线
 
-`policies/invoices.yml`:
+`POST /q/{name}`,头 `X-Plinth-Token: <token>`:
 
-```yaml
-table: invoices
-rules:
-  - role: accountant
-    columns: { allow: "*", deny: [internal_note] }
-    row: org_id == $token.org and status != 'VOID'
-  - role: ops
-    columns:
-      allow: [id, status, buyer_id, amount_total, currency]
-    row: true
-  - role: "*"
-    columns: { allow: [] }
-    row: false
-```
+1. token 匹配配置表得调用方名(`plinth.yml` 的 `auth.tokens`,name→token 环境变量展开);
+2. 查询存在且 `allow-tokens` 含该调用方,否则 404/403;
+3. JSON body 参数校验:未知参数 400;required 缺失 400;类型按声明强校验(int 接受整值 JSON number→int64;float→float64;bool;str);optional 缺失取 default,无 default 则绑 NULL;
+4. `:name` 重写为 `$N`,按首现顺序绑定参数;
+5. 执行:ctx 语句超时(查询级或默认),行数上限默认 10000,超限报错不截断;
+6. 响应:`{"rows":[...]}` + `X-Plinth-Rows` + `X-Plinth-Duration-Ms`;错误统一 RFC 7807 problem-details;404 与「查询不存在」「无权」区分(内网服务间语义明确优先,不做人造模糊)。
 
-`events/invoices.yml`:
+热加载:SIGHUP 或文件监听重载注册表;重载失败保留旧表并告警,绝不半载。
 
-```yaml
-triggers:
-  - table: invoices
-    operations: [insert, update]
-    deliver:
-      url: https://api.silkline.id/hooks/invoice-changed
-      secret_env: EVENT_SECRET
-      retry: { backoff: exponential, base: 5s, max: 1h, attempts: 8 }
-crons:
-  - name: nightly-reconcile
-    schedule: "17 2 * * *"
-    deliver: { url: https://api.silkline.id/hooks/reconcile, secret_env: EVENT_SECRET }
-```
+## 5. 只读与安全(双保险)
 
-**内省与注解分层**是与 Directus snapshot 的本质区别:启动时内省器读真实 schema,YAML 只声明「在这之上暴露什么」;`plinth diff` 比对线上内省与 YAML 引用的列/关系,库结构漂移时启动失败或显式报错,不静默。修改后 `SIGHUP` 或文件监听热加载;加载失败保留旧目录并告警,绝不半载。
+- **静态检查(加载闸)**:基于 `sqlscan` 剥离注释与字符串内容后的文本判定——必须以 `SELECT`/`WITH` 开头;禁止一切 `;`(多语句);禁词表全词匹配(INSERT/UPDATE/DELETE/MERGE/CREATE/ALTER/DROP/TRUNCATE/GRANT/REVOKE/COPY/CALL/DO/SET/RESET/VACUUM/REINDEX/INTO/LOCK/LISTEN/NOTIFY/PREPARE/EXECUTE/DISCARD/IMPORT/LOAD/CHECKPOINT/REASSIGN 及危险函数 PG_READ_FILE/PG_SLEEP/LO_IMPORT 等)。字符串内容已剥离,关键词藏在字符串里不会误判也不会漏判;引号标识符保守保留(内容含禁词即拒)。检查器为独立函数 `readcheck.Check(sql) error`,v0.2 可换完整 parser 而不动调用方。
+- **运行时兜底**:连接串使用只授予 SELECT 的独立数据库角色;每查询语句超时;行数上限。两道闸任一道独立成立。
+- 注入面:参数永远走 pgx 绑定,SQL 文本中不出现任何运行时拼接的值。
 
-## 4. 请求流水线(REST 引擎 + 权限)
+## 6. 审计
 
-查询语法采用 **PostgREST 语义子集**:过滤操作符 `eq/ne/gt/gte/lt/lte/in/like/is`,逻辑 `and/or`,`select=` 列选择与单层关系嵌套,`order/limit/offset`,响应头返回行数。不自创语法;PostgREST 文档为规范,其公开测试用例为验收锚。
+- **变更审计 = git**:每次 Claude 改 SQL 即 commit,`semantics` 头声明所依据快照,diff 可审。
+- **执行审计 = JSONL 追加**(`audit.path`):`{ts, caller, query, params, rows, ms, status, err}`;`audit.mask_params` 列出的参数名记录为 `"***"`;文件按天滚动(v0.2 轮转,先手动归档);写入失败记日志、不阻断请求(可用性优先,丢一条审计可容忍,写入器持锁串行)。
+
+## 7. 语义同步(Lovrabet)
+
+`plinth.yml` 配 `semantics.pull_command`(外部命令,默认指向 lovrabet CLI 的数据集导出);`plinth semantics pull` 执行该命令,产物落 `semantics/*.yml`,并写 `semantics/snapshot.txt`(内容哈希作快照版本)。查询头部 `semantics: dataset=X snapshot=Y`;`plinth validate` 校验:引用的 dataset 在快照中存在(缺→错误),snapshot ≠ 当前快照版本(**→ 告警不失败**,提示 Claude 复查 SQL)。运行时零依赖 Lovrabet;pull 命令可替换为任意脚本(测试用 fixture 脚本)。
+
+## 8. agent 工作循环
+
+**CLI 是第一 agent 接口**:`validate / test / pull / serve / status` 五个子命令即 Claude Code 的操作面,经 Bash 直接调用;输出为可直接阅读的文本,退出码 0/2/3 可判读(成功/元数据错/数据库错),无隐藏状态。MCP server 是 v0.3 的可选第二封面,agent 闭环不依赖它。
 
 ```
-请求 → JWT 验签(JWKS)
-     → claims 解出 role/org/sub
-     → 查已编译策略:列投影 + 行谓词
-     → SQL 生成器:白名单 SELECT + 行谓词 AND 用户过滤,全参数化
-     → pgx 连接池执行 → JSON
+Claude: plinth semantics pull            # 语义快照更新
+      → 读 semantics/,发现受影响查询(validate 告警)
+      → 写/改 queries/*.sql
+      → plinth validate                  # 格式/参数/只读/语义引用,离线
+      → plinth test --query invoice-list # 真库、只读角色、默认参数试跑
+      → git commit                       # 变更审计
+      → SIGHUP                           # 热加载,业务即刻可用
 ```
 
-安全设计:
+## 9. 测试策略
 
-- **行过滤表达式语言**:and/or/not/eq/ne/in/gt/gte/lt/lte/is null,操作数为本表列名或 `$token.<claim>`;启动时编译为参数化 SQL 片段树,token 声明按请求绑定为参数值。metadata 中禁止出现 SQL 字符串,校验器强制执行。
-- **写操作同谓词**:POST 插入前列校验;UPDATE/DELETE 生成 `WHERE <策略谓词> AND <用户过滤>`,受影响行数为 0 时返回 404,与记录不存在同形,防存在性探测。
-- 列拒绝不在错误中区分「无权」与「不存在」;错误响应不回显 SQL。
+- 单元:`queryfile` golden 解析(含畸形);`sqlscan` 状态机语料(注释/字符串/$$/::/E'');`readcheck` 攻击语料(多语句、CTE 内 DELETE、SELECT INTO、字符串藏关键词);`exec` 参数强转表驱动;`audit` 脱敏断言。
+- 集成(testcontainers,fixture 同 SilkLine 形态):注册表全链加载;HTTP 鉴权矩阵(未知 token/无权/ok);参数校验矩阵;执行与行上限;审计落盘内容;热加载。
+- 安全门禁(CI 阻塞):readcheck 语料全过;`sqlscan` native fuzz(字符串/注释状态机不炸、参数发现不漏)。
 
-## 5. 事件与自动化
+## 10. 工程化与发布
 
-- **捕获:logical replication(pgoutput)**。零表级 DDL、零触发器;要求 `wal_level=logical`(实例配置)与一个复制槽。不用 LISTEN/NOTIFY(需在目标库建触发器),不用轮询作主路径(滞后且丢 delete)。目标库给不了 logical 时降级 `polling` 模式(xmin/updated_at 水位),文档明标局限(丢 delete、秒级滞后)。
-- **投递**:at-least-once;HMAC 签名头(secret_env 提供);指数退避重试(次数/上限可配);超限进死信。死信持久于本地嵌入库,经 CLI/MCP 查看与重放。重启后从复制槽确认位点续投,不丢不重(至少一次语义)。
-- **cron**:5 字段表达式,到点投递 webhook(与表事件同一投递器、同一死信机制)。不执行命令、不跑脚本——无任意代码执行面。
+同 v1:Apache-2.0、goreleaser 单二进制 + docker、README 英文 + 中文文档、CHANGELOG、语义化版本。仓库 `github.com/dayuer/plinth`。
 
-## 6. MCP server
+## 11. 成功标准
 
-双传输:streamable HTTP(同进程,路径 `/mcp`)与 stdio(本地调试)。
+1. 一个真实业务查询(如 SilkLine 发票列表)经 Plinth 服务、被真实调用方调用;
+2. Claude 改 SQL→validate→test→commit→热加载 全循环无人工编辑 SQL;
+3. 执行审计能回答「哪个服务、何时、用什么参数、跑了哪个查询、返回多少行」。
 
-工具集:`schema-read`(内省目录+策略摘要)、`items-query/create/update/delete`、`metadata-validate`、`metadata-diff`、`deadletter-list`、`deadletter-replay`。
-
-铁律:MCP 与 REST 走同一条权限流水线;MCP 令牌绑定可配置角色,默认窄角色;`items-delete`、`deadletter-replay` 等高危工具可在配置中逐个禁用。Claude 的日常循环:读 `schema-read` → 改 YAML → `metadata-validate/diff` → 提交 → 热加载。
-
-## 7. 错误处理与可观测
-
-- 错误体统一 RFC 7807 problem-details;策略拒绝与 404 同形;SQLSTATE 映射(如 23505→409);参数校验错 400 带字段路径。
-- 启动失败三分类退出码:metadata 校验错(2)/数据库不可达或漂移(3)/JWKS 不可达(4)。
-- 请求路径无状态;事件投递状态持久;优雅停机:停止收新请求 → 排空在途投递 → 确认复制位点 → 退出。
-- 可观测:slog 结构化日志;`/metrics` Prometheus;请求 ID 贯穿 REST 处理与事件投递日志;慢查询阈值日志;`plinth status` 输出健康摘要(连接、槽位、死信数、最近投递延迟)。
-
-## 8. 测试策略
-
-- **单元**:SQL 生成器 golden 测试(用 PostgREST 语义用例集);权限编译器属性测试;表达式解析器 fuzzing(go-fuzz 常驻 CI)。
-- **集成**:testcontainers-go 起临时 PG,fixture 为 SilkLine 形态多租户 schema(organizations/users/invoices/buyers);**权限矩阵表驱动测试**:角色×表×列×行 的期望可见性全枚举,一格一测;假 webhook 接收器验证投递/重试/死信/重放闭环;漂移检测测试(改表结构后 diff 必须报)。
-- **安全门禁**(发布阻塞项,非普通测试):注入攻击语料集(每个过滤操作符喂 hostile 输入,断言永远参数化);越权矩阵回归;JWKS 轮换/过期 token 用例。
-- **CI**:gosec + staticcheck + lint;goreleaser 构建单二进制与 docker 镜像;vegeta 压测冒烟出基线 RPS 报告。
-
-## 9. 工程化与发布
-
-Apache-2.0;README 英文,文档英文+中文;README 致谢 PostgREST(语义规范与测试锚)与 Directus 调研启发的架构取舍,无代码复制。发版走 goreleaser + CHANGELOG + 语义化版本(v0.x 起)。仓库:`github.com/dayuer/plinth`。
-
-## 10. 成功标准
-
-1. SilkLine 生产真实流量经 Plinth 服务(替换至少一个手写 CRUD 端点,三个月内);
-2. Claude 经 MCP 改 YAML→validate→diff→热加载的工作流日常可用;
-3. 权限矩阵测试全绿且注入门禁在 CI 强制。
-
-外部用户为 stretch goal,不计入验收。
-
-## 11. 风险与对策
+## 12. 风险与对策
 
 | 风险 | 对策 |
 |---|---|
-| SQL 生成器是最难件(关系嵌套、防注入) | PostgREST 语义当规范、其测试用例当验收;MVP 嵌套深度锁 1 |
-| logical replication 依赖实例配置 | 降级 polling 模式文档化;SilkLine 自有机器可直接开 |
-| 单实例无 HA | 明示边界;无状态请求路径 + 位点续投,重启即恢复 |
-| 表达式语言表达力不够 | 只服务行过滤场景;复杂需求引导写 PG 视图(Plinth 内省视图如同表) |
-| 自用项目维护精力有限 | 成功标准控制范围;非目标清单挡需求蔓延 |
+| SQL 质量依赖 Claude | validate(静态)+ test(真库试跑)双闸;git 审计可回滚 |
+| 简化静态检查存在绕过面 | 只读角色独立兜底;v0.2 换完整 parser 的接口已留 |
+| Lovrabet CLI 不可用/变动 | 快照化解耦,运行时零依赖;pull_command 可配置可替换 |
+| 审计文件无限增长 | 按天滚动 v0.2;先手动归档 |
+| 查询拖垮库 | 语句超时 + 行数上限 + 只读角色;慢查询进执行审计(ms 字段) |
